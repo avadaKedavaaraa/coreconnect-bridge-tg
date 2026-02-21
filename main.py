@@ -61,14 +61,16 @@ def run_health_server():
 threading.Thread(target=run_health_server, daemon=True).start()
 
 # ==========================================
-# 🧠 ETERNAL MEMORY (Supabase Persistence)
+# 🧠 ETERNAL MEMORY (Dedicated Supabase Table)
 # ==========================================
-CONFIG_ID = "BRIDGE_TOPIC_CONFIG"
+CONFIG_ID = "main_group_topic"
 
 def load_topic_id_from_db():
     try:
-        res = supabase.table("items").select("content").eq("id", CONFIG_ID).execute()
-        if res.data: return int(res.data[0]['content'])
+        # Now looking in the dedicated 'bridge_config' table
+        res = supabase.table("bridge_config").select("topic_id").eq("id", CONFIG_ID).execute()
+        if res.data and res.data[0].get('topic_id') is not None: 
+            return int(res.data[0]['topic_id'])
     except Exception as e:
         logger.error(f"Memory Load Error: {e}")
     return None
@@ -76,14 +78,12 @@ def load_topic_id_from_db():
 def save_topic_id_to_db(topic_id):
     payload = {
         "id": CONFIG_ID,
-        "title": "Bot Config",
-        "content": str(topic_id),
-        "type": "bot_metadata",
-        "sector": "system",
-        "date": datetime.now(IST).strftime("%Y.%m.%d %H:%M:%S")
+        "topic_id": topic_id,
+        "updated_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     }
     try:
-        supabase.table("items").upsert(payload).execute()
+        # Saving to the dedicated table
+        supabase.table("bridge_config").upsert(payload).execute()
     except Exception as e:
         logger.error(f"Memory Save Error: {e}")
 
@@ -218,3 +218,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
