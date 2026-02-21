@@ -180,7 +180,14 @@ async def verify_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def auto_bridge_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ACTIVE_TOPIC_ID
     msg = update.message
+    
+    # 1️⃣ First check: Is there a message with text?
     if not msg or not msg.text: return 
+
+    # 🛑 2️⃣ THE SECRET PASSCODE FILTER 🛑
+    # If "7c2e" is NOT in the text (converted to lowercase for safety), stop right here!
+    if "7c2e" not in msg.text.lower():
+        return
 
     is_private = update.effective_chat.type == "private"
     authorized = await is_sender_authorized(update, context)
@@ -321,3 +328,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
