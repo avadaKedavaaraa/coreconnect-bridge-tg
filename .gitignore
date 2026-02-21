@@ -1,0 +1,10 @@
+# Secrets
+.env
+bridge_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
