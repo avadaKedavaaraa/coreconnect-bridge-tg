@@ -12,6 +12,7 @@ import pytz
 import httpx
 from dotenv import load_dotenv
 
+import telegram.error
 from telegram import Update
 from telegram.constants import ParseMode, ChatMemberStatus
 from telegram.ext import (
@@ -32,7 +33,11 @@ ADMIN_USER = os.getenv("ADMIN_USERNAME", "").lower()
 TARGET_SECTOR = "announcements" 
 IST = pytz.timezone('Asia/Kolkata')
 
+# 🤫 Suppress the noisy HTTP and polling logs during rolling deployments
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Updater").setLevel(logging.ERROR) # Stops the conflict spam
+
 logger = logging.getLogger(__name__)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -57,7 +62,8 @@ class ReusableTCPServer(socketserver.TCPServer):
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     try:
-        with ReusableTCPServer(("", port), HealthCheckHandler) as httpd:
+        # Binding to 0.0.0.0 is much safer for Render deployments!
+        with ReusableTCPServer(("0.0.0.0", port), HealthCheckHandler) as httpd:
             print(f"📡 Secure Health server active on port {port}")
             httpd.serve_forever()
     except Exception as e:
@@ -122,6 +128,14 @@ MEME_RESPONSES = [
     "🚧 **Rukiye! Pehle admin baniye.**"
 ]
 
+# --- 🛠️ SILENT ERROR HANDLER ---
+# 🔥 FIX: Matched the function name to what you register below!
+async def silent_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, telegram.error.Conflict):
+        logger.warning("⚠️ Deployment Overlap: Another bot instance is winding down. Syncing... ⏳")
+    else:
+        logger.error(f"❌ Bot Error: {context.error}")
+
 # ==========================================
 # 🛡️ AUTHENTICATION & LOGIC
 # ==========================================
@@ -152,7 +166,8 @@ async def verify_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ACTIVE_TOPIC_ID = msg.message_thread_id
     
-    save_topic_id_to_db(ACTIVE_TOPIC_ID)
+    # 🔥 FIX: Prevent the DB call from blocking your Telegram async event loop!
+    await asyncio.to_thread(save_topic_id_to_db, ACTIVE_TOPIC_ID)
     
     try:
         await context.bot.send_message(
@@ -214,7 +229,7 @@ async def auto_bridge_listener(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_sender_authorized(update, context):
-        await update.message.reply_text("🌉 **BRIDGE BOT ONLINE**\n*Receipts will be sent here.*")
+        await update.message.reply_text("🌉 **BRIDGE BOT ONLINE**\n*Receipts will be sent here.*", parse_mode=ParseMode.MARKDOWN)
     else:
         await update.message.reply_text(random.choice(MEME_RESPONSES))
 
@@ -235,7 +250,8 @@ async def sysdiag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_status = "🔴 FAILED (Check RLS or Keys)"
     if supabase:
         try:
-            test_read = supabase.table("items").select("id").limit(1).execute()
+            # 🔥 FIX: Using to_thread to keep the bot responsive during network checks
+            test_read = await asyncio.to_thread(supabase.table("items").select("id").limit(1).execute)
             db_status = "🟢 ONLINE & RLS BYPASSED"
         except Exception as e:
             db_status = f"🔴 RLS BLOCKING / ERROR: {str(e)[:50]}"
@@ -258,7 +274,8 @@ async def sysdiag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import psutil
         process = psutil.Process()
         mem_mb = process.memory_info().rss / (1024 * 1024)
-    except: pass
+    except ImportError: 
+        pass # psutil not installed, that's fine
 
     report = (
         f"⚡ <b>VASUKI CORE DIAGNOSTICS</b> ⚡\n"
@@ -286,6 +303,10 @@ async def ping_server(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TOKEN).build()
+    
+    # 🔥 FIX: Correctly mapping the error handler name
+    app.add_error_handler(silent_error_handler)
+    
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("verifytopic", verify_topic))
     app.add_handler(CommandHandler("sysdiag", sysdiag_command)) 
@@ -295,7 +316,7 @@ def main():
     
     print(f"🥷 Stealth Bridge Active | Memory loaded: {ACTIVE_TOPIC_ID is not None}")
     
-    # 🔥 FIX: Clears ghost instances on Render without blocking the port!
+    # Start polling safely
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
