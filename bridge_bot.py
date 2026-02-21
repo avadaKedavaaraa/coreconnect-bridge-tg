@@ -36,14 +36,24 @@ logger = logging.getLogger(__name__)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==========================================
-# 🌐 RENDER KEEP-ALIVE SERVER
+# 🌐 RENDER KEEP-ALIVE SERVER (SECURED)
 # ==========================================
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Only return a 200 OK status, NEVER serve files!
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"CoreConnect Bridge is Online and Secure.")
+        
+    def log_message(self, format, *args):
+        pass # Suppress HTTP logs so your console stays clean
+
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
-    handler = http.server.SimpleHTTPRequestHandler
     try:
-        with socketserver.TCPServer(("", port), handler) as httpd:
-            print(f"📡 Health check server active on port {port}")
+        with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+            print(f"📡 Secure Health server active on port {port}")
             httpd.serve_forever()
     except Exception as e:
         logger.error(f"Health Server Error: {e}")
@@ -174,13 +184,20 @@ async def auto_bridge_listener(update: Update, context: ContextTypes.DEFAULT_TYP
             "style": { "titleColor": theme['start'], "titleColorEnd": theme['end'], "isGradient": True }
         }
 
-        supabase.table("items").insert(payload).execute()
+        # Fix 2: Run the blocking Supabase call in a separate thread so it doesn't freeze the bot
+        import asyncio
+        await asyncio.to_thread(supabase.table("items").insert(payload).execute)
         
-        await context.bot.send_message(
-            chat_id=update.effective_user.id,
-            text=f"✅ **SYNCED TO WEB**\n━━━━━━━━━━━━\n📌 {html.escape(title)}\n📅 {get_ist_time()}",
-            parse_mode=ParseMode.HTML
-        )
+        # Fix 3: Isolate the DM receipt so a failed DM doesn't register as a DB failure
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text=f"✅ **SYNCED TO WEB**\n━━━━━━━━━━━━\n📌 {html.escape(title)}\n📅 {get_ist_time()}",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as dm_error:
+            logger.warning(f"Could not send DM receipt to admin (they haven't started the bot): {dm_error}")
+            
     except Exception as e:
         logger.error(f"Sync failed: {e}")
 
