@@ -6,8 +6,10 @@ import random
 import threading
 import http.server
 import socketserver
+import asyncio
 from datetime import datetime
 import pytz
+import httpx
 from dotenv import load_dotenv
 
 from telegram import Update
@@ -40,14 +42,13 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ==========================================
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        # Only return a 200 OK status, NEVER serve files!
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b"CoreConnect Bridge is Online and Secure.")
         
     def log_message(self, format, *args):
-        pass # Suppress HTTP logs so your console stays clean
+        pass 
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -61,16 +62,18 @@ def run_health_server():
 threading.Thread(target=run_health_server, daemon=True).start()
 
 # ==========================================
-# 🧠 ETERNAL MEMORY (Dedicated Supabase Table)
+# 🧠 ETERNAL MEMORY (Supabase Persistence)
 # ==========================================
-CONFIG_ID = "main_group_topic"
+CONFIG_ID = "BRIDGE_TOPIC_CONFIG"
 
 def load_topic_id_from_db():
     try:
-        # Now looking in the dedicated 'bridge_config' table
-        res = supabase.table("bridge_config").select("topic_id").eq("id", CONFIG_ID).execute()
-        if res.data and res.data[0].get('topic_id') is not None: 
-            return int(res.data[0]['topic_id'])
+        res = supabase.table("items").select("content").eq("id", CONFIG_ID).execute()
+        if res.data and len(res.data) > 0: 
+            print(f"🧠 Memory Loaded Successfully: Topic ID {res.data[0]['content']}")
+            return int(res.data[0]['content'])
+        else:
+            print("🧠 Memory Check: No config found in database yet.")
     except Exception as e:
         logger.error(f"Memory Load Error: {e}")
     return None
@@ -78,14 +81,20 @@ def load_topic_id_from_db():
 def save_topic_id_to_db(topic_id):
     payload = {
         "id": CONFIG_ID,
-        "topic_id": topic_id,
-        "updated_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+        "title": "Bot Config",
+        "content": str(topic_id),
+        "type": "bot_metadata",
+        "sector": "system",
+        "date": datetime.now(IST).strftime("%Y.%m.%d %H:%M:%S"),
+        "isUnread": False,
+        "isPinned": False,
+        "author": "System"
     }
     try:
-        # Saving to the dedicated table
-        supabase.table("bridge_config").upsert(payload).execute()
+        res = supabase.table("items").upsert(payload).execute()
+        print(f"💾 Memory Save Success: {res.data}")
     except Exception as e:
-        logger.error(f"Memory Save Error: {e}")
+        logger.error(f"Memory Save CRITICAL Error: {e}")
 
 ACTIVE_TOPIC_ID = load_topic_id_from_db()
 
@@ -138,12 +147,14 @@ async def verify_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ACTIVE_TOPIC_ID = msg.message_thread_id
+    
+    # FORCED SYNC SAVE to guarantee memory isn't lost before a restart
     save_topic_id_to_db(ACTIVE_TOPIC_ID)
     
     try:
         await context.bot.send_message(
             chat_id=update.effective_user.id,
-            text=f"🔗 **TOPIC LINKED!**\n━━━━━━━━━━━━\n✅ ID: `{ACTIVE_TOPIC_ID}`\n🧠 *Memory saved to Database.*",
+            text=f"🔗 **TOPIC LINKED!**\n━━━━━━━━━━━━\n✅ ID: `{ACTIVE_TOPIC_ID}`\n🧠 *Memory forcefully saved to Database.*",
             parse_mode=ParseMode.MARKDOWN
         )
     except: pass
@@ -184,11 +195,8 @@ async def auto_bridge_listener(update: Update, context: ContextTypes.DEFAULT_TYP
             "style": { "titleColor": theme['start'], "titleColorEnd": theme['end'], "isGradient": True }
         }
 
-        # Fix 2: Run the blocking Supabase call in a separate thread so it doesn't freeze the bot
-        import asyncio
         await asyncio.to_thread(supabase.table("items").insert(payload).execute)
         
-        # Fix 3: Isolate the DM receipt so a failed DM doesn't register as a DB failure
         try:
             await context.bot.send_message(
                 chat_id=update.effective_user.id,
@@ -196,7 +204,7 @@ async def auto_bridge_listener(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode=ParseMode.HTML
             )
         except Exception as dm_error:
-            logger.warning(f"Could not send DM receipt to admin (they haven't started the bot): {dm_error}")
+            logger.warning(f"Could not send DM receipt: {dm_error}")
             
     except Exception as e:
         logger.error(f"Sync failed: {e}")
@@ -207,15 +215,93 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(random.choice(MEME_RESPONSES))
 
+
+async def sysdiag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Core diagnostic tool - strictly for ENV admins in DM"""
+    user = update.effective_user
+    
+    # Strictly ENV Admin only (Fixed for this script)
+    if not user.username or user.username.lower() != ADMIN_USER:
+        await update.message.reply_text("⛔ **ACCESS DENIED: ENV ADMIN ONLY**", parse_mode=ParseMode.HTML)
+        return
+        
+    # Strictly Private DM only (Fixed for this script)
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("🔒 **STRICTLY PRIVATE CHAT ONLY**", parse_mode=ParseMode.HTML)
+        return
+
+    msg = await update.message.reply_text("🔄 *Running VASUKI Core Diagnostics...*", parse_mode=ParseMode.MARKDOWN)
+    
+    # 1. Test Supabase RLS / Write Permissions
+    db_status = "🔴 FAILED (Check RLS or Keys)"
+    if supabase:
+        try:
+            # Attempt a tiny non-destructive read
+            test_read = supabase.table("items").select("id").limit(1).execute()
+            db_status = "🟢 ONLINE & RLS BYPASSED"
+        except Exception as e:
+            db_status = f"🔴 RLS BLOCKING / ERROR: {str(e)[:50]}"
+
+    # 2. Test Keep-Alive Ping
+    ping_status = "🔴 URL NOT SET"
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if render_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(render_url)
+                if resp.status_code == 200:
+                    ping_status = f"🟢 SUCCESS ({resp.status_code})"
+                else:
+                    ping_status = f"🟡 WARNING ({resp.status_code})"
+        except Exception as e:
+            ping_status = f"🔴 PING FAILED: {str(e)[:30]}"
+
+    # 3. Calculate Memory
+    mem_mb = 0
+    try:
+        import psutil
+        process = psutil.Process()
+        mem_mb = process.memory_info().rss / (1024 * 1024)
+    except: pass
+
+    report = (
+        f"⚡ <b>VASUKI CORE DIAGNOSTICS</b> ⚡\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🗄️ <b>Supabase DB:</b> {db_status}\n"
+        f"📡 <b>Keep-Alive URL:</b> {ping_status}\n"
+        f"🧠 <b>RAM Usage:</b> {mem_mb:.1f} MB\n"
+        f"📅 <b>Queued Ping Jobs:</b> {len(context.job_queue.jobs())}\n\n"
+        f"<i>All systems verified by ENV Admin.</i>"
+    )
+    await msg.edit_text(report, parse_mode=ParseMode.HTML)
+
+# ==========================================
+# 🔄 ANTI-SLEEP PING JOB
+# ==========================================
+async def ping_server(context: ContextTypes.DEFAULT_TYPE):
+    """Pings the Render URL every 5 minutes to prevent sleep."""
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if url:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get(url)
+                logger.info("🔔 Self-ping successful to keep Render awake.")
+        except Exception as e:
+            logger.warning(f"Self-ping failed: {e}")
+
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("verifytopic", verify_topic))
+    app.add_handler(CommandHandler("sysdiag", sysdiag_command)) # <--- ADD THIS LINE!
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_bridge_listener))
     
-    print(f"🥷 Stealth Bridge Active | Memory: {ACTIVE_TOPIC_ID is not None}")
+    # Inject the Self-Ping Job (Runs every 300 seconds)
+    app.job_queue.run_repeating(ping_server, interval=300, first=60)
+    
+    print(f"🥷 Stealth Bridge Active | Memory loaded: {ACTIVE_TOPIC_ID is not None}")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
