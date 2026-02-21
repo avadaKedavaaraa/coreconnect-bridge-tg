@@ -50,10 +50,14 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass 
 
+# 🔥 FIX: Force the server to override the old port!
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     try:
-        with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+        with ReusableTCPServer(("", port), HealthCheckHandler) as httpd:
             print(f"📡 Secure Health server active on port {port}")
             httpd.serve_forever()
     except Exception as e:
@@ -148,7 +152,6 @@ async def verify_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ACTIVE_TOPIC_ID = msg.message_thread_id
     
-    # FORCED SYNC SAVE to guarantee memory isn't lost before a restart
     save_topic_id_to_db(ACTIVE_TOPIC_ID)
     
     try:
@@ -215,39 +218,32 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(random.choice(MEME_RESPONSES))
 
-
 async def sysdiag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Core diagnostic tool - strictly for ENV admins in DM"""
     user = update.effective_user
     
-    # Strictly ENV Admin only (Fixed for this script)
     if not user.username or user.username.lower() != ADMIN_USER:
         await update.message.reply_text("⛔ **ACCESS DENIED: ENV ADMIN ONLY**", parse_mode=ParseMode.HTML)
         return
         
-    # Strictly Private DM only (Fixed for this script)
     if update.effective_chat.type != "private":
         await update.message.reply_text("🔒 **STRICTLY PRIVATE CHAT ONLY**", parse_mode=ParseMode.HTML)
         return
 
     msg = await update.message.reply_text("🔄 *Running VASUKI Core Diagnostics...*", parse_mode=ParseMode.MARKDOWN)
     
-    # 1. Test Supabase RLS / Write Permissions
     db_status = "🔴 FAILED (Check RLS or Keys)"
     if supabase:
         try:
-            # Attempt a tiny non-destructive read
             test_read = supabase.table("items").select("id").limit(1).execute()
             db_status = "🟢 ONLINE & RLS BYPASSED"
         except Exception as e:
             db_status = f"🔴 RLS BLOCKING / ERROR: {str(e)[:50]}"
 
-    # 2. Test Keep-Alive Ping
     ping_status = "🔴 URL NOT SET"
     render_url = os.environ.get("RENDER_EXTERNAL_URL")
     if render_url:
         try:
-            import httpx
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(render_url)
                 if resp.status_code == 200:
@@ -257,7 +253,6 @@ async def sysdiag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             ping_status = f"🔴 PING FAILED: {str(e)[:30]}"
 
-    # 3. Calculate Memory
     mem_mb = 0
     try:
         import psutil
@@ -280,7 +275,6 @@ async def sysdiag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🔄 ANTI-SLEEP PING JOB
 # ==========================================
 async def ping_server(context: ContextTypes.DEFAULT_TYPE):
-    """Pings the Render URL every 5 minutes to prevent sleep."""
     url = os.environ.get("RENDER_EXTERNAL_URL")
     if url:
         try:
@@ -294,14 +288,15 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("verifytopic", verify_topic))
-    app.add_handler(CommandHandler("sysdiag", sysdiag_command)) # <--- ADD THIS LINE!
+    app.add_handler(CommandHandler("sysdiag", sysdiag_command)) 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_bridge_listener))
     
-    # Inject the Self-Ping Job (Runs every 300 seconds)
     app.job_queue.run_repeating(ping_server, interval=300, first=60)
     
     print(f"🥷 Stealth Bridge Active | Memory loaded: {ACTIVE_TOPIC_ID is not None}")
-    app.run_polling()
+    
+    # 🔥 FIX: Clears ghost instances on Render without blocking the port!
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
